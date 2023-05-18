@@ -12,11 +12,13 @@ The system configuration is specified in a text file named `config.txt`. The fir
 
 Here's an example configuration:
 
+```
 100 200
 1 127.0.0.1 8001
 2 127.0.0.1 8002
 3 127.0.0.1 8003
 4 127.0.0.1 8004
+```
 
 This configuration specifies a system with 4 processes. The minimum delay for sending messages is 100 milliseconds, and the maximum delay is 200 milliseconds. The processes have IDs 1 through 4, and they all run on the local machine (127.0.0.1), with ports 8001 through 8004.
 
