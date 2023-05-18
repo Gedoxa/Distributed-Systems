@@ -1,4 +1,4 @@
-# Distributed System Simulation
+# A simple network simulation
 
 This project simulates a distributed system using TCP/IP for communication between processes. Each process can send and receive messages to/from other processes with a specified delay.
 
