@@ -27,7 +27,7 @@ This configuration specifies a system with 4 processes. The minimum delay for se
 To run the simulation, simply execute the Go file:
 
 ```bash
-go run main.go
+go run mp1.go
 
 send [destinationID] [message]
 
