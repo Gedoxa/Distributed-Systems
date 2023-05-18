@@ -4,7 +4,7 @@ This project simulates a distributed system using TCP/IP for communication betwe
 
 ## Structure
 
-The project consists of a single Go file that contains all the necessary functions to simulate a distributed system. The system configuration is read from a text file.
+The project consists of a single Go file that contains all the necessary functions to simulate a simple network system. The system configuration is read from a text file.
 
 ## Configuration
 
