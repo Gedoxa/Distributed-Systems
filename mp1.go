@@ -3,6 +3,7 @@ package main
 //import necessary packages.
 import (
 	"bufio"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"math/rand"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +30,13 @@ type Config struct {
 	MinDelay  int       // Minimum delay for sending messages
 	MaxDelay  int       // Maximum delay for sending messages
 	Processes []Process // List of all processes in the system
+}
+
+// UnicastMessage is the struct for passing messages between processes
+// it includes the source id and it's corresponding messages
+type UnicastMessage struct {
+	SourceID int    //Source ID or Sender ID
+	Message  string // Message from the sender
 }
 
 // ParseConfig function reads a configuration file and returns a Config struct.
@@ -75,135 +84,129 @@ func ParseConfig(filename string) (*Config, error) {
 }
 
 // unicast_send function sends a message to a process through a network connection.
-// The message is prefixed with the sender's process ID.
-func unicast_send(conn net.Conn, processID int, message string) {
-	// Write the process ID and the message to the connection.
-	fmt.Fprintln(conn, strconv.Itoa(processID)+" "+message)
+func unicast_send(encoder *gob.Encoder, sourceID int, message string) {
+	//creating a new instance of UnicastMessage Struct
+	msg := UnicastMessage{SourceID: sourceID, Message: message}
+	//Encoding the msg object
+	err := encoder.Encode(msg)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 // unicast_send_with_delay function sends a message to a process with a delay.
 // The delay is a random duration between the minimum and maximum delay specified in the configuration.
-func unicast_send_with_delay(conn net.Conn, processID int, message string, delay time.Duration) {
+func unicast_send_with_delay(encoder *gob.Encoder, processID int, message string, delay time.Duration) {
 	// Start a new goroutine to send the message after the delay.
 	go func() {
 		time.Sleep(delay)
-		unicast_send(conn, processID, message)
+		unicast_send(encoder, processID, message)
 	}()
 }
 
 // unicast_receive function listens for incoming messages from a process.
-// When a message is received, it prints the message, the sender's process ID, and the current system time.
-func unicast_receive(conn net.Conn, processID int) {
-	scanner := bufio.NewScanner(conn)
-	// Create a scanner to read the connection line by line.
-	for scanner.Scan() { // Read each line.
-		message := scanner.Text()                           // Get the message from the line.
-		senderID := strings.Split(message, " ")[0]          // the sender ID is the first part of the message
-		message = strings.TrimPrefix(message, senderID+" ") // Remove the sender ID from the message.
-		//Print the received message, the sender's process ID, and the current system time.
-		fmt.Println("Received message:", message, "from process", senderID, ", system time is:", time.Now())
+func unicast_receive(decoder *gob.Decoder) {
+	for {
+		// Create a new UnicastMessage struct to store the incoming message
+		msg := UnicastMessage{}
+		//  decoding the incoming message
+		err := decoder.Decode(&msg)
+
+		if err != nil {
+			log.Fatal(err)
+		}
+		// Print the received message, the sender's process ID, and the current time
+		fmt.Printf("Received message: %s from process %d, system time is: %s\n", msg.Message, msg.SourceID, time.Now().Format(time.RFC3339))
 	}
 }
 
 // startProcess function starts a process.
-// It opens a network connection for each other process in the system,
-// and starts a goroutine to listen for incoming messages from each other process.
-// It also starts a goroutine to handle user input.
 func startProcess(process Process, config *Config) {
-	// Start listening for incoming network connections.
-	ln, err := net.Listen("tcp", process.IP+":"+process.Port)
-	if err != nil {
-		log.Fatal(err) // Log an error and exit if there's a problem starting the listener.
-	}
-	defer ln.Close() // Ensure the listener is closed when the function returns. Defer waits until the completion of function.
+	// initialize a wait group to sync multiple goroutines
+	var wg sync.WaitGroup
+	// Create a map to store gob.Encoder objects for each connection
+	connMap := make(map[int]*gob.Encoder)
 
-	// Create a map to store the network connections to other processes.
-	connections := make(map[int]net.Conn)
+	// Server side
+	go func() {
+		// Start listening for incoming connections
+		ln, _ := net.Listen("tcp", ":"+process.Port)
+		for {
+			// Accept an incoming connection
+			conn, _ := ln.Accept()
+			// Create a new gob.Decoder for the connection
+			decoder := gob.NewDecoder(conn)
+			// Increment the wait group counter
+			wg.Add(1)
+			// Start a new goroutine
+			go func() {
+				unicast_receive(decoder)
+				// Decrement the counter when the goroutine completes
+				wg.Done()
+			}()
+		}
+	}()
+
+	// Client side
 	for _, otherProcess := range config.Processes {
-		if otherProcess.ID < process.ID {
-			// Connect to each other process that has a lower ID.
-			conn, err := net.Dial("tcp", otherProcess.IP+":"+otherProcess.Port)
-			if err != nil {
-				log.Fatal(err) // Log an error and exit if there's a problem connecting.
+		if otherProcess.ID != process.ID {
+			var conn net.Conn
+			var err error
+			retries := 5
+			// Try to establish the connection
+			for i := 0; i < retries; i++ {
+				// Dial the other process
+				conn, err = net.Dial("tcp", otherProcess.IP+":"+otherProcess.Port)
+				if err == nil { // If the connection is successful, break the loop
+					break
+				}
+				// If the connection is not successful, wait for a period and retry
+				time.Sleep(time.Second * time.Duration(i+1))
 			}
-			connections[otherProcess.ID] = conn       // Store the connection in the map.
-			fmt.Fprintln(conn, process.ID)            // Send the process ID to the other process.
-			go unicast_receive(conn, otherProcess.ID) // Start a goroutine to receive messages from the other process.
+			// If the connection is still not successful after all retries, log the error
+			if err != nil {
+				log.Fatal(err)
+			}
+			// Close the connection when the function returns
+			defer conn.Close()
+			// Create a new gob.Encoder for the connection and store it in the map
+			connMap[otherProcess.ID] = gob.NewEncoder(conn)
 		}
 	}
-	// Start a goroutine to handle user input.
-	go handleUserInput(process, connections, config.MinDelay, config.MaxDelay)
-	// Loop indefinitely, accepting incoming connections.
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Fatal(err) // Log an error and exit if there's a problem accepting a connection.
-		}
-		// Get the ID of the other process from the connection.
-		otherID, err := getOtherID(conn)
-		if err != nil {
-			log.Fatal(err) // Log an error and exit if there's a problem getting the other process's ID.
-		}
-		// Store the connection in the map.
-		connections[otherID] = conn
-		go unicast_receive(conn, otherID)
-	}
-}
 
-// getOtherID function reads the first line from a network connection,
-// which should contain the ID of the other process.
-func getOtherID(conn net.Conn) (int, error) {
-	// Create a scanner to read the connection line by line.
-	scanner := bufio.NewScanner(conn)
-	scanner.Scan()              // read the first line
-	firstLine := scanner.Text() // Get the first line.
-
-	// Convert the first line to an integer.
-	otherID, err := strconv.Atoi(firstLine)
-	if err != nil {
-		return 0, err // Return an error if there's a problem converting the line to an integer.
-	}
-	// Return the other process's ID.
-	return otherID, nil
+	// Start a goroutine to handle user input
+	go handleUserInput(process, connMap, config.MinDelay, config.MaxDelay)
+	// Wait for all goroutines to complete
+	wg.Wait()
 }
 
 // handleUserInput function listens for user input.
-// When the user enters a command, it parses the command and performs the appropriate action.
-// The command format is: send [destinationID] [message]
-func handleUserInput(process Process, connections map[int]net.Conn, minDelay int, maxDelay int) {
-	// Create a scanner to read user input line by line.
+func handleUserInput(process Process, connections map[int]*gob.Encoder, minDelay int, maxDelay int) {
 	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() { // Read each line.
-		command := strings.Split(scanner.Text(), " ") // Split the line into words.
-		if len(command) < 2 {
-			// Print an error message if the command is not in proper format.
-			fmt.Println("Invalid command. Please enter a command in the format: send [destinationID] [message]")
-			continue
-		}
-		//Handle the "send" command.
-		if command[0] == "send" {
-			// Convert the destination ID to an integer.
-			destinationID, _ := strconv.Atoi(command[1])
-
-			// Join the rest of the command into a message, even if it's an empty string.
-			message := ""
-			if len(command) > 2 {
-				message = strings.Join(command[2:], " ")
+	// Continuously read from input
+	for scanner.Scan() {
+		// Split the input into words
+		command := strings.Split(scanner.Text(), " ")
+		if command[0] == "send" && len(command) > 1 {
+			// convert the second word to an integer
+			destinationID, err := strconv.Atoi(command[1])
+			if err == nil {
+				// Check if there is a connection to the destination process
+				if encoder, ok := connections[destinationID]; ok {
+					message := strings.Join(command[2:], " ")
+					// Calculate a random delay within the specified range
+					delay := time.Duration(minDelay+rand.Intn(maxDelay-minDelay)) * time.Millisecond
+					// Send the message to the destination process after the delay
+					unicast_send_with_delay(encoder, process.ID, message, delay)
+					fmt.Printf("Sent message: %s to process %d, system time is: %s\n", message, destinationID, time.Now().Format(time.RFC3339))
+				} else {
+					fmt.Printf("Invalid destination process ID: %d\n", destinationID)
+				}
+			} else {
+				fmt.Println("Invalid command format. Use: send [destinationID] [message]")
 			}
-
-			// Check if the connection to the destination process exists
-			conn, ok := connections[destinationID]
-			if !ok {
-				// Print an error message if the connection does not exist.
-				fmt.Printf("No connection to process %d. Please check the configuration.\n", destinationID)
-				continue
-			}
-			// Calculate a random delay for sending the message.
-			delay := time.Duration(minDelay+rand.Intn(maxDelay-minDelay)) * time.Millisecond
-			// Send the message with the delay.
-			unicast_send_with_delay(conn, process.ID, message, delay)
-			// Print a message indicating that the message was sent.
-			fmt.Println("Sent message:", message, "to process:", destinationID, ", system time is:", time.Now())
+		} else {
+			fmt.Println("Invalid command format. Use: send [destinationID] [message]")
 		}
 	}
 }
